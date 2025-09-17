@@ -1,0 +1,96 @@
+from models import db, Location, Route, Alert
+from sqlalchemy import func
+from datetime import datetime, timedelta, timezone
+from config import Config
+
+def create_alert(user_id, alert_type, location_id, details):
+    """Helper function to create and save an alert."""
+    # Check if a similar alert was raised recently to avoid duplicates
+    recent_alert = Alert.query.filter(
+        Alert.user_id == user_id,
+        Alert.alert_type == alert_type,
+        Alert.created_at >= datetime.now(timezone.utc) - timedelta(minutes=30)
+    ).first()
+
+    if not recent_alert:
+        alert = Alert(
+            user_id=user_id,
+            alert_type=alert_type,
+            location_id=location_id,
+            details=details
+        )
+        db.session.add(alert)
+        db.session.commit()
+        print(f"ALERT CREATED: {alert_type} for user {user_id}")
+
+def check_sudden_dropoff(user_id, current_location_ts):
+    """
+    Detects if location updates have stopped unexpectedly.
+    """
+    last_location = Location.query.filter_by(user_id=user_id)\
+        .order_by(Location.timestamp.desc()).offset(1).first()
+
+    if last_location:
+        time_diff = current_location_ts - last_location.timestamp
+        if time_diff.total_seconds() > Config.LOCATION_DROP_OFF_SECONDS:
+            return True, f"Location signal dropped for {int(time_diff.total_seconds() / 60)} minutes."
+    return False, ""
+
+def check_prolonged_inactivity(user_id, current_location_point):
+    """
+    Checks if the user has been stationary for too long.
+    """
+    time_threshold = datetime.now(timezone.utc) - timedelta(seconds=Config.PROLONGED_INACTIVITY_SECONDS)
+    
+    # Find the farthest point the user has been in the last hour
+    farthest_point = db.session.query(Location.coordinates)\
+        .filter(Location.user_id == user_id, Location.timestamp >= time_threshold)\
+        .order_by(func.ST_Distance(Location.coordinates, current_location_point).desc()).first()
+
+    if farthest_point:
+        distance = db.session.query(
+            func.ST_Distance(farthest_point[0], current_location_point)
+        ).scalar()
+        
+        # If the max distance moved in the period is less than 50 meters
+        if distance < 50:
+            return True, f"User has been inactive (moved less than 50m) for over an hour."
+    return False, ""
+
+def check_route_deviation(user_id, current_location_point):
+    """
+    Checks if the user has deviated from their active, planned route.
+    """
+    active_route = Route.query.filter_by(user_id=user_id, is_active=True).first()
+    if active_route:
+        # ST_Distance in PostGIS/GeoAlchemy2 gives distance in meters for geography types
+        distance_from_route = db.session.query(
+            func.ST_Distance(active_route.path, current_location_point)
+        ).scalar()
+
+        if distance_from_route > Config.ROUTE_DEVIATION_METERS:
+            return True, f"Deviated {int(distance_from_route)} meters from the planned route."
+    return False, ""
+
+def run_all_checks(user_id, location_data):
+    """
+    Orchestrator function to run all anomaly checks.
+    """
+    current_point = f"POINT({location_data['longitude']} {location_data['latitude']})"
+    current_ts = datetime.fromisoformat(location_data['timestamp'])
+    location_id = location_data['id']
+
+    # 1. Check for deviation from a planned route
+    is_deviated, details_dev = check_route_deviation(user_id, current_point)
+    if is_deviated:
+        create_alert(user_id, 'ROUTE_DEVIATION', location_id, details_dev)
+
+    # 2. Check for sudden communication drop-off
+    is_dropped, details_drop = check_sudden_dropoff(user_id, current_ts)
+    if is_dropped:
+        create_alert(user_id, 'LOCATION_DROPOFF', location_id, details_drop)
+
+    # 3. Check for prolonged inactivity
+    is_inactive, details_inactive = check_prolonged_inactivity(user_id, current_point)
+    if is_inactive:
+        create_alert(user_id, 'PROLONGED_INACTIVITY', location_id, details_inactive)
