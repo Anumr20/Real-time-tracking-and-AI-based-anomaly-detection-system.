@@ -1,0 +1,8 @@
+distress_signal_backend/
+│
+├── app.py                # Main Flask application, API endpoints
+├── anomaly_detector.py     # Core logic for detecting anomalies
+├── models.py             # SQLAlchemy database models
+├── tasks.py                # Celery task definitions
+├── config.py               # Configuration settings
+└── requirements.txt        # Python dependencies
