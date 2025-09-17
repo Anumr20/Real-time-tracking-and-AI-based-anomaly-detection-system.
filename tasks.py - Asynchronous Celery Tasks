@@ -1,0 +1,18 @@
+from celery import Celery
+from app import create_app  # Import factory function to get app context
+from anomaly_detector import run_all_checks
+
+# We need the app context for the database connection
+app = create_app()
+celery = Celery(app.import_name, broker=app.config['CELERY_BROKER_URL'])
+celery.conf.update(app.config)
+
+@celery.task
+def check_for_anomalies(user_id, location_data):
+    """
+    Celery task to run anomaly checks in the background.
+    """
+    with app.app_context():
+        print(f"Running anomaly checks for user {user_id}...")
+        run_all_checks(user_id, location_data)
+        print(f"Checks complete for user {user_id}.")
